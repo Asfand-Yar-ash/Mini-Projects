@@ -1,2 +1,18 @@
- Starting SOON
-on 8th March
+from fastapi import FastAPI
+from pydantic import BaseModel, HttpUrl
+import httpx
+
+app = FastAPI()
+
+class URLRequest(BaseModel):
+    url: HttpUrl
+
+@app.post("/check")
+async def check_status(data: URLRequest):
+    async with httpx.AsyncClient() as client:
+        response = await client.get(data.url)
+
+    return {
+        "url": data.url,
+        "status": response.status_code
+    }
