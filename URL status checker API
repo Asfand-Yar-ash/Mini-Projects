@@ -1,38 +1,37 @@
 from fastapi import FastAPI
 from pydantic import BaseModel, HttpUrl
 import httpx, asyncio
-
+from typing import List
 app = FastAPI()
 
 class URLRequest(BaseModel):
-    url: HttpUrl
+    urls: list[HttpUrl]
 
 class URLResponse(BaseModel):
     url: HttpUrl
     status: int | None
     reachable: bool
 
-async def Fetch_url(Url):
+async def Fetch_url(client:httpx.AsyncClient, url: HttpUrl):
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(str(Url))
-
+        response = await client.get(str(url))
         return {
-            "url": Url,
+            "url": url,
             "status": response.status_code,
             "reachable": True
         }
 
     except httpx.RequestError:
         return {
-            "url": Url,
+            "url": url,
             "status": None,
             "reachable": False
         }
 
-@app.post("/check", response_model=URLResponse)
-async def check_status(data1: URLRequest, data2: URLRequest, data3: URLRequest):
-    response = await asyncio.gather(Fetch_url(data1),Fetch_url(data2),Fetch_url(data3))
-    return response
+@app.post("/check", response_model=List[URLResponse])
+async def check_status(data: URLRequest):
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        tasks = [Fetch_url(client, url) for url in data.urls]
+        results = await asyncio.gather(*tasks)
 
-asyncio.run(check_status())
+    return results
