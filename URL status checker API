@@ -1,8 +1,8 @@
-from fastapi import FastAPI
-from pydantic import BaseModel, HttpUrl
+from fastapi import FastAPI, BackgroundTasks, Depends
+from pydantic import HttpUrl, BaseModel
+from sqlmodel import Field, Session, SQLModel, create_engine
 import httpx, asyncio
-from typing import List
-app = FastAPI()
+from typing import List, Annotated
 
 class URLRequest(BaseModel):
     urls: list[HttpUrl]
@@ -11,27 +11,92 @@ class URLResponse(BaseModel):
     url: HttpUrl
     status: int | None
     reachable: bool
+    error: str | None = None
 
-async def Fetch_url(client:httpx.AsyncClient, url: HttpUrl):
+class URLRecord(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    url: str
+    status: int | None
+    reachable: bool
+    error: str | None = None
+
+sqlite_file_name = "API_Checker_database.db"
+sqlite_url = f"sqlite:///{sqlite_file_name}"
+
+connect_args = {"check_same_thread": False}
+engine = create_engine(sqlite_url,connect_args=connect_args)
+
+def create_db_and_tables():
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+SessionDep = Annotated[Session, Depends(get_session)]
+
+app = FastAPI()
+
+def write_notification(url: str, status: int | None):
+    with open("log.txt", mode="a") as log:
+        if status is not None and 200 <= status < 400:
+            content = f"{url} is Okay to go"
+            log.write(content + "\n")
+        else:
+            content = f"{url} is Not Okay to go"
+            log.write(content + "\n")
+
+async def fetch_url(client: httpx.AsyncClient, url: HttpUrl):
     try:
         response = await client.get(str(url))
-        return {
-            "url": url,
-            "status": response.status_code,
-            "reachable": True
-        }
+        return URLResponse(
+            url=url,
+            status=response.status_code,
+            reachable=True,
+            error=None
+        )
 
-    except httpx.RequestError:
-        return {
-            "url": url,
-            "status": None,
-            "reachable": False
-        }
+    except httpx.RequestError as e:
+        return URLResponse(
+            url=url,
+            status=None,
+            reachable=False,
+            error=str(e)
+        )
+
+async def get_http_client():
+    return app.state.client
+
+@app.on_event("startup")
+def on_startup():
+    app.state.client = httpx.AsyncClient(timeout=5.0)
+    create_db_and_tables()
 
 @app.post("/check", response_model=List[URLResponse])
-async def check_status(data: URLRequest):
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        tasks = [Fetch_url(client, url) for url in data.urls]
-        results = await asyncio.gather(*tasks)
+async def check_status(data: URLRequest, background_tasks : BackgroundTasks,session: SessionDep, client : httpx.AsyncClient = Depends(get_http_client)):
+    tasks = [fetch_url(client, url) for url in data.urls]
+    results = await asyncio.gather(*tasks)
+    db_objects = []
+
+    for result in results:
+        db_api = URLRecord(
+        url=str(result.url),
+        status=result.status,
+        reachable=result.reachable,
+        error=result.error
+    )
+        db_objects.append(db_api)
+
+    session.add_all(db_objects)
+    session.commit()
+    for result in results:
+        background_tasks.add_task(
+            write_notification,
+                str(result.url),
+                result.status
+            )
 
     return results
+@app.on_event("shutdown")
+async def shutdown():
+    await app.state.client.aclose()
