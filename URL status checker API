@@ -1,6 +1,6 @@
-from fastapi import FastAPI, BackgroundTasks, Depends
+from fastapi import FastAPI, BackgroundTasks, Depends, Query
 from pydantic import HttpUrl, BaseModel
-from sqlmodel import Field, Session, SQLModel, create_engine
+from sqlmodel import Field, Session, SQLModel, create_engine, select
 import httpx, asyncio
 from typing import List, Annotated
 
@@ -16,6 +16,13 @@ class URLResponse(BaseModel):
 class URLRecord(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     url: str
+    status: int | None
+    reachable: bool
+    error: str | None = None
+
+class URLResponseWithID(BaseModel):
+    id: int
+    url: HttpUrl
     status: int | None
     reachable: bool
     error: str | None = None
@@ -68,7 +75,7 @@ async def get_http_client():
     return app.state.client
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     app.state.client = httpx.AsyncClient(timeout=5.0)
     create_db_and_tables()
 
@@ -97,6 +104,20 @@ async def check_status(data: URLRequest, background_tasks : BackgroundTasks,sess
             )
 
     return results
+
+@app.get("/check", response_model=List[URLResponseWithID])
+async def Check_Record(session: SessionDep, offset: int =0, limit: Annotated[int, Query(le=100)] = 100):
+    url = session.exec(select(URLRecord).order_by(URLRecord.id).offset(offset).limit(limit)).all()
+    return [
+    URLResponseWithID(
+        id=record.id,
+        url=record.url,
+        status=record.status,
+        reachable=record.reachable,
+        error=record.error
+    )
+    for record in url
+]
 @app.on_event("shutdown")
 async def shutdown():
     await app.state.client.aclose()
